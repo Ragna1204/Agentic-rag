@@ -1,0 +1,11 @@
+openai
+faiss-cpu
+rank-bm25
+elasticsearch
+pydantic
+requests
+rich
+pytest
+pyyaml
+sentence-transformers
+cross-encoder
