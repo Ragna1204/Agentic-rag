@@ -28,3 +28,11 @@ tools:
 logging:
   level: "INFO"
   file: "logs/agentic_rag.log"
+
+memory:
+  working_memory_capacity: 10
+  episodic_log_path: "storage/episodic_memory.log"
+
+bias:
+  sycophancy_factor: 0.5
+  confirmation_bias_strength: 0.5

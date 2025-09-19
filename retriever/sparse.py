@@ -24,19 +24,22 @@ class BM25Retriever:
         Args:
             corpus (List[dict]): A list of documents, where each dict has 'source' and 'content'.
         """
-        # TODO: The corpus should be loaded from a file or database, not passed in directly.
-        # This is not scalable for large document sets.
-        logger.info("Initializing BM25 retriever.")
-        try:
-            self.corpus = corpus
-            self.documents = [doc['content'] for doc in corpus]
-            tokenized_corpus = [doc.lower().split() for doc in self.documents]
-            self.bm25 = BM25Okapi(tokenized_corpus)
-            logger.info(f"BM25 index created with {len(self.documents)} documents.")
-        except Exception as e:
-            logger.error(f"Failed to initialize BM25Retriever: {e}")
-            self.bm25 = None
-            self.corpus = []
+        self.corpus = []
+        self.documents = []
+        self.bm25 = None
+        if corpus:
+            self.add_documents(corpus)
+
+    def add_documents(self, new_corpus: List[dict]):
+        """
+        Adds new documents to the corpus and rebuilds the BM25 index.
+        """
+        logger.info(f"Adding {len(new_corpus)} new documents to BM25 index.")
+        self.corpus.extend(new_corpus)
+        self.documents = [doc['content'] for doc in self.corpus]
+        tokenized_corpus = [doc.lower().split() for doc in self.documents]
+        self.bm25 = BM25Okapi(tokenized_corpus)
+        logger.info(f"BM25 index rebuilt with {len(self.documents)} total documents.")
 
     def retrieve(self, query: str, top_k: int = 5) -> List[DocumentChunk]:
         """
@@ -77,6 +80,7 @@ class BM25Retriever:
         except Exception as e:
             logger.error(f"Error during sparse retrieval: {e}")
             return []
+
 
 # TODO: Implement an Elasticsearch-based sparse retriever for production use cases.
 # from elasticsearch import Elasticsearch

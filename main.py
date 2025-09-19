@@ -25,11 +25,18 @@ from core.planner import Planner
 from core.executor import Executor
 from core.verifier import Verifier
 from core.aggregator import Aggregator
+from core.bias import BiasFilter
+from core.reflection import Reflection
 
 # Import retriever components
 from retriever.dense import DenseRetriever
 from retriever.sparse import BM25Retriever
 from retriever.hybrid import HybridRetriever
+
+# Import memory components
+from memory.working_memory import WorkingMemory
+from memory.episodic import EpisodicMemory
+from memory.semantic import SemanticMemory
 
 # Import tool components
 from tools.calculator import Calculator
@@ -66,9 +73,6 @@ def initialize_components(config: dict) -> dict:
     ]
 
     # Retrievers
-    # TODO: The DenseRetriever requires a pre-built FAISS index.
-    # For this example, it will likely fail to initialize unless you create one.
-    # We will handle its potential failure gracefully.
     try:
         dense_retriever = DenseRetriever(
             model_name=config['retriever']['dense']['model'],
@@ -90,7 +94,6 @@ def initialize_components(config: dict) -> dict:
         logger.warning("Dense retriever not available, Hybrid retriever will not be used.")
         hybrid_retriever = None
 
-
     # Tools
     tools = {}
     if config['tools']['calculator']['enabled']:
@@ -100,14 +103,21 @@ def initialize_components(config: dict) -> dict:
     if config['tools']['database']['enabled']:
         tools['database'] = DatabaseConnector(connection_string=config['tools']['database']['connection_string'])
     
-    # Add retrievers to the list of available tools for the planner
     tools['sparse_retriever'] = sparse_retriever
     if hybrid_retriever:
         tools['hybrid_retriever'] = hybrid_retriever
 
+    # Memory Components
+    working_memory = WorkingMemory(capacity=config.get('memory', {}).get('working_memory_capacity', 10))
+    episodic_memory = EpisodicMemory(log_file=config.get('memory', {}).get('episodic_log_path', 'storage/episodic_memory.log'))
+    # Semantic memory uses a retriever as its backend
+    semantic_memory_retriever = hybrid_retriever if hybrid_retriever else sparse_retriever
+    semantic_memory = SemanticMemory(retriever=semantic_memory_retriever)
 
-    # Core agent components
+    # Cognitive & Core Components
     router = Router()
+    bias_filter = BiasFilter(config=config.get('bias', {}))
+    reflection = Reflection(episodic_memory=episodic_memory, semantic_memory=semantic_memory, llm_client=llm_client)
     planner = Planner(llm_client=llm_client, available_tools=list(tools.keys()))
     executor = Executor(tools=tools)
     verifier = Verifier(llm_client=llm_client)
@@ -120,8 +130,13 @@ def initialize_components(config: dict) -> dict:
         "executor": executor,
         "verifier": verifier,
         "aggregator": aggregator,
-        "sparse_retriever": sparse_retriever,
         "llm_client": llm_client,
+        "working_memory": working_memory,
+        "episodic_memory": episodic_memory,
+        "semantic_memory": semantic_memory,
+        "bias_filter": bias_filter,
+        "reflection": reflection,
+        "sparse_retriever": sparse_retriever, # Keep for simple RAG
     }
 
 def run_simple_rag(query: str, components: dict) -> FinalAnswer:
@@ -129,8 +144,12 @@ def run_simple_rag(query: str, components: dict) -> FinalAnswer:
     Executes a simplified RAG pipeline for straightforward queries.
     """
     console.print("[bold cyan]Running Simple RAG Pipeline...[/bold cyan]")
-    retriever = components['sparse_retriever'] # Default to sparse for simplicity
+    retriever = components['sparse_retriever']
     llm_client = components['llm_client']
+    episodic_memory = components['episodic_memory']
+
+    # Log the query
+    episodic_memory.log_event("simple_query", {"query": query})
 
     # 1. Retrieve
     retrieved_docs = retriever.retrieve(query, top_k=3)
@@ -144,68 +163,103 @@ def run_simple_rag(query: str, components: dict) -> FinalAnswer:
     )
     answer = response.choices[0].message.content
 
-    return FinalAnswer(
+    final_answer = FinalAnswer(
         answer=answer,
         sources=retrieved_docs,
-        confidence_score=0.6, # Default confidence for simple RAG
+        confidence_score=0.6,
         unverified_claims=["Answer was generated without a verification step."]
     )
+    
+    # Log the final answer
+    episodic_memory.log_event("simple_answer", {"answer": final_answer.model_dump()})
+    return final_answer
 
 def run_agentic_pipeline(query: str, components: dict) -> FinalAnswer:
     """
     Executes the full, multi-step agentic RAG pipeline.
     """
     console.print("[bold magenta]Running Agentic RAG Pipeline...[/bold magenta]")
+    
+    # Extract components
+    working_memory = components['working_memory']
+    episodic_memory = components['episodic_memory']
+    planner = components['planner']
+    bias_filter = components['bias_filter']
+    executor = components['executor']
+    verifier = components['verifier']
+    aggregator = components['aggregator']
 
-    # 1. Plan
+    # Start of the cognitive loop
+    working_memory.clear()
+    working_memory.add({"type": "user_query", "content": query})
+    episodic_memory.log_event("agentic_query", {"query": query})
+
+    # 1. Plan (with bias)
     console.print("[bold]Step 1: Generating Action Plan...[/bold]")
-    plan = components['planner'].generate_plan(query)
-    console.print(Panel(plan.model_dump_json(indent=2), title="Action Plan", border_style="green"))
+    plan = planner.generate_plan(query)
+    
+    # Apply bias to the plan
+    plan = bias_filter.apply_to_plan(plan)
+    console.print(Panel(plan.model_dump_json(indent=2), title="Action Plan (Biased)", border_style="green"))
+    working_memory.add({"type": "plan", "content": plan.model_dump()})
+    episodic_memory.log_event("agentic_plan", {"plan": plan.model_dump()})
 
     # 2. Execute
     console.print("[bold]Step 2: Executing Plan...[/bold]")
-    step_results = components['executor'].execute_plan(plan)
-    # TODO: Display execution results in a structured way.
+    step_results = executor.execute_plan(plan)
+    working_memory.add({"type": "execution_results", "content": step_results})
+    episodic_memory.log_event("agentic_execution", {"results": step_results})
 
     # 3. Verify
     console.print("[bold]Step 3: Verifying Claims...[/bold]")
-    # For this example, we'll just try to verify the first summary we find.
-    # A real implementation would extract claims from all relevant step outputs.
     summaries = [res for res in step_results.values() if isinstance(res, str)]
     all_docs = [res for res in step_results.values() if isinstance(res, list)]
     evidence_docs = [doc for sublist in all_docs for doc in sublist]
 
     verification_results = []
     if summaries and evidence_docs:
-        claims_to_verify = components['verifier'].extract_claims(summaries[0])
+        claims_to_verify = verifier.extract_claims(summaries[0])
         if claims_to_verify:
-            # Verify the first claim as a demo
             claim = claims_to_verify[0]
             console.print(f"Verifying claim: '{claim}'")
-            ver_res = components['verifier'].verify(claim, evidence_docs)
+            ver_res = verifier.verify(claim, evidence_docs)
             verification_results.append(ver_res)
             console.print(Panel(ver_res.model_dump_json(indent=2), title="Verification Result", border_style="yellow"))
+    
+    working_memory.add({"type": "verification", "content": [res.model_dump() for res in verification_results]})
 
     # 4. Aggregate
     console.print("[bold]Step 4: Aggregating Final Answer...[/bold]")
-    final_answer = components['aggregator'].synthesize_answer(
+    final_answer = aggregator.synthesize_answer(
         query=query,
         step_results=step_results,
         verification_results=verification_results
     )
+    
+    episodic_memory.log_event("agentic_answer", {"answer": final_answer.model_dump()})
     return final_answer
 
 def main():
     """Main function to run the CLI."""
     parser = argparse.ArgumentParser(description="Agentic RAG Pipeline CLI")
-    parser.add_argument("query", type=str, help="The query to process.")
+    parser.add_argument("query", type=str, nargs='?', default=None, help="The query to process.")
+    parser.add_argument("--reflect", action="store_true", help="Run the memory consolidation (reflection) process.")
     args = parser.parse_args()
-
-    console.print(Panel(f"[bold]Query:[/bold] {args.query}", title="[bold blue]Agentic RAG System[/bold blue]", border_style="blue"))
 
     try:
         config = load_config()
         components = initialize_components(config)
+
+        if args.reflect:
+            console.print("[bold purple]Running Reflection Process...[/bold purple]")
+            reflection_result = components['reflection'].consolidate_memories()
+            console.print(Panel(str(reflection_result), title="[bold purple]Reflection Complete[/bold purple]", border_style="purple"))
+            return
+
+        if not args.query:
+            parser.error("the following arguments are required: query")
+
+        console.print(Panel(f"[bold]Query:[/bold] {args.query}", title="[bold blue]Agentic RAG System[/bold blue]", border_style="blue"))
 
         # Use the router to decide the path
         path = components['router'].decide_path(args.query)
